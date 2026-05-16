@@ -131,6 +131,46 @@ function isOpenAIConvertibleMessage(
 }
 
 /**
+ * Merge delta usage into accumulated usage, preserving cache fields from
+ * previous values when the delta carries explicit zeroes.
+ *
+ * Mirrors updateUsage() in claude.ts: Anthropic's streaming API may send
+ * explicit 0 for cache fields in message_delta events, which should not
+ * overwrite valid values from message_start. OpenAI-compatible endpoints
+ * don't currently exhibit this behavior, but defensive field-level merging
+ * prevents a future adapter change from silently zeroing cache data.
+ */
+function updateOpenAIUsage(
+  current: {
+    input_tokens: number
+    output_tokens: number
+    cache_creation_input_tokens: number
+    cache_read_input_tokens: number
+  },
+  delta: {
+    input_tokens?: number
+    output_tokens?: number
+    cache_creation_input_tokens?: number
+    cache_read_input_tokens?: number
+  },
+): typeof current {
+  return {
+    input_tokens: delta.input_tokens ?? current.input_tokens,
+    output_tokens: delta.output_tokens ?? current.output_tokens,
+    cache_creation_input_tokens:
+      delta.cache_creation_input_tokens !== undefined &&
+      delta.cache_creation_input_tokens > 0
+        ? delta.cache_creation_input_tokens
+        : current.cache_creation_input_tokens,
+    cache_read_input_tokens:
+      delta.cache_read_input_tokens !== undefined &&
+      delta.cache_read_input_tokens > 0
+        ? delta.cache_read_input_tokens
+        : current.cache_read_input_tokens,
+  }
+}
+
+/**
  * Assemble the final AssistantMessage (and optional max_tokens error) from
  * accumulated stream state. Extracted to avoid duplication between the
  * `message_stop` handler and the post-loop safety fallback.
@@ -449,7 +489,10 @@ export async function* queryModelOpenAI(
         case 'message_delta': {
           const deltaUsage = (event as any).usage
           if (deltaUsage) {
-            usage = { ...usage, ...deltaUsage }
+            // Defensive merge: only update fields that are present and meaningful.
+            // Matches the pattern in claude.ts updateUsage() — prevents a future
+            // adapter change from silently zeroing cache fields via spread.
+            usage = updateOpenAIUsage(usage, deltaUsage)
           }
           if ((event as any).delta?.stop_reason != null) {
             stopReason = (event as any).delta.stop_reason
